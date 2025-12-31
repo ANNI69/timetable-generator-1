@@ -126,7 +126,6 @@ class Schedule:
         self.div_batch_busy = defaultdict(lambda: defaultdict(lambda: defaultdict(set)))
         self.theory_rooms_used = defaultdict(lambda: defaultdict(int))
         
-        # Enhanced State Tracking
         self.div_subjects = defaultdict(lambda: defaultdict(lambda: defaultdict(str)))
         self.div_type_history = defaultdict(lambda: defaultdict(lambda: defaultdict(str)))
         self.div_daily_count = defaultdict(lambda: defaultdict(int))
@@ -134,7 +133,6 @@ class Schedule:
     def is_free(self, day, start, gene, strict_repetition_check=True):
         if start + gene.duration > self.constants['SLOTS_PER_DAY']: return False
         
-        # --- 1. HARD ANTI-REPETITION (Look Both Ways) ---
         if strict_repetition_check:
             prev_s = start - 1
             if prev_s == self.constants['RECESS_INDEX']: prev_s -= 1
@@ -147,7 +145,6 @@ class Schedule:
             if next_s < self.constants['SLOTS_PER_DAY']:
                 next_sub = self.div_subjects[day][next_s][gene.div]
                 if next_sub == gene.subject: return False
-        # ---------------------------------------------
 
         for s in range(start, start + gene.duration):
             if s == self.constants['RECESS_INDEX']: return False
@@ -204,11 +201,9 @@ class Schedule:
                     diff = span - len(valid)
                     if diff > 0: gaps += diff
                 
-                # --- STRICT SPARSE DAY PENALTY ---
                 daily_count = self.div_daily_count[div][d]
                 if 0 < daily_count < 3: 
                     sparse_penalty += 1
-
         return gaps, sparse_penalty
 
 # ==========================================
@@ -228,13 +223,11 @@ def get_rooms_for_gene(schedule, day, start, gene, resources, home_rooms, specia
     needed = len(gene.teachers_list)
     found_rooms = []
     
-    # 1. THEORY/ELECTIVE: Try Home Room First
     if gene.type in ["THEORY", "ELECTIVE"]:
         if schedule.theory_rooms_used[day][start] + needed > len(resources.theory_rooms): return None
         pool = list(resources.theory_rooms); random.shuffle(pool)
         home = home_rooms.get(gene.div)
         
-        # Priority: Home Room
         if home and home in pool:
              if check_room_free(schedule, day, start, gene.duration, home):
                  pool.remove(home)
@@ -247,7 +240,6 @@ def get_rooms_for_gene(schedule, day, start, gene, resources, home_rooms, specia
                     assigned = r; break
             if assigned: found_rooms.append(assigned)
             
-    # 2. LABS/TUTS: Strict & Fuzzy Matching
     else: 
         reserved_rooms = {r for rooms in special_rooms.values() for r in rooms}
         lab_pool = [r for r in resources.lab_rooms if r not in reserved_rooms]
@@ -258,9 +250,7 @@ def get_rooms_for_gene(schedule, day, start, gene, resources, home_rooms, specia
             sub_name = gene.lab_subjects[i]
             assigned = None
             
-            # --- PROJECT/LIBRARY EXCEPTION ---
             if sub_name == 'PROJECT' or sub_name == 'LIBRARY':
-                # Projects use theory rooms or just placeholder
                 for r in theory_pool:
                      if r not in found_rooms and check_room_free(schedule, day, start, gene.duration, r):
                         assigned = r; break
@@ -288,13 +278,11 @@ def get_rooms_for_gene(schedule, day, start, gene, resources, home_rooms, specia
 
 def calculate_cost(schedule, day, slot, gene, constants):
     cost = 0
-    # 1. GRAVITY (Push classes earlier) - INCREASED WEIGHT
+    # 1. GRAVITY
     cost += slot * 100
     
-    # 2. BE Morning Preference
     if "BE" in gene.div and slot >= 4: cost += 50000
 
-    # 3. Teacher Fatigue
     for t in gene.teachers_list:
         if t.id == "-1": continue
         t_slots = schedule.teacher_slots[t.id][day]
@@ -307,19 +295,31 @@ def calculate_cost(schedule, day, slot, gene, constants):
         if consecutive >= 1: cost += 1000
         if consecutive >= 2: cost += 5000
 
-    # 4. Student Gaps & Holes - MASSIVE PENALTY UPDATE
+    # 4. NUCLEAR GAP CHECKER (Aggressive Update)
     current_slots = schedule.div_slots[gene.div][day]
     if current_slots:
         all_s = sorted(current_slots + [slot])
-        span = all_s[-1] - all_s[0] + 1
-        if all_s[0] < constants['RECESS_INDEX'] < all_s[-1]: span -= 1
-        actual_gaps = span - len(all_s)
         
-        # Penalize gaps severely to force compactness
-        if actual_gaps > 0: cost += 50000 
-        else: cost -= 1000 # Reward perfect stacking
+        # Calculate Span (including the potential new slot)
+        span = all_s[-1] - all_s[0] + 1
+        # Adjust for Recess
+        if all_s[0] < constants['RECESS_INDEX'] < all_s[-1]: 
+            span -= 1 
+            
+        count = len(all_s)
+        actual_gaps = span - count
+        
+        if actual_gaps > 0:
+            # 50 Million points per gap slot. Gap = Enemy #1.
+            cost += (actual_gaps * 50000000) 
+            
+            # The "Commuter Constraint": Spanning recess with a gap is instant death (200M)
+            if all_s[0] < constants['RECESS_INDEX'] and all_s[-1] > constants['RECESS_INDEX']:
+                cost += 200000000 
+        else:
+            # Reward compactness to break ties
+            cost -= 10000 
 
-    # 5. Type-Specific Preferences
     if gene.type == "ELECTIVE":
         if slot == 0: cost -= 50000 
         elif slot > 1: cost += 50000 
@@ -341,9 +341,8 @@ def calculate_cost(schedule, day, slot, gene, constants):
 
     if gene.type == "LAB":
         busy_batches = schedule.div_batch_busy[day][slot][gene.div]
-        if busy_batches: cost -= 5000 # Increased reward for parallel labs
+        if busy_batches: cost -= 5000 
 
-    # 6. Anti-Repeat (Soft Backup)
     prev_s = slot - 1
     if prev_s == constants['RECESS_INDEX']: prev_s -= 1
     if prev_s >= 0:
@@ -353,7 +352,7 @@ def calculate_cost(schedule, day, slot, gene, constants):
     return cost
 
 def solve(genes, config, resources, home_rooms, special_rooms):
-    logger.info("--- Starting Solver (FORCEFUL COMPLETION MODE) ---")
+    logger.info("--- Starting Solver (Zero Gap Aggression) ---")
     best_sched = None
     best_score = -float('inf')
     
@@ -362,19 +361,15 @@ def solve(genes, config, resources, home_rooms, special_rooms):
         'RECESS_INDEX': 4 
     }
 
-    # IMPORTANT: Shuffle genes slightly to prevent SE-A from always being last/worst
-    # But keep the Type priority (Lab > Tut > Theory)
     random.shuffle(genes) 
     genes.sort(key=lambda g: 0 if g.type == "LAB" else (1 if g.type == "MATHS_TUT" else (2 if g.type == "ELECTIVE" else 3)))
 
     TOTAL_BATCHES = 3 
 
-    # INCREASED ITERATIONS for difficult constraints
     for run in range(5000): 
         schedule = Schedule(copy.deepcopy(genes), CONSTANTS)
         unplaced = []
         
-        # PANIC MODE starts earlier to force completion
         panic_mode = run > 1500
         strict_rep = run < 2500
 
@@ -386,16 +381,16 @@ def solve(genes, config, resources, home_rooms, special_rooms):
             all_slots = list(range(config.slots_per_day))
             
             valid_starts = []
+            
             if g.duration == 2:
-                # Split Labs -> Late Afternoon preference
+                hod_blocks = [0, 2, 5, 7] 
+                valid_hod = [s for s in hod_blocks if s + 2 <= config.slots_per_day]
+
                 if len(g.batch_ids) < TOTAL_BATCHES:
-                    priority = [5, 6, 7] 
-                    others = [s for s in all_slots if s not in priority and s != 3 and s != 4 and s+1 != 4 and s+2 <= config.slots_per_day]
-                    random.shuffle(priority); random.shuffle(others)
-                    valid_starts = priority + others
+                    valid_starts = sorted(valid_hod, key=lambda x: -x) 
                 else:
-                    valid_starts = [s for s in all_slots if s != 3 and s != 4 and s + 1 != 4 and s + 2 <= config.slots_per_day]
-                    random.shuffle(valid_starts)
+                    random.shuffle(valid_hod)
+                    valid_starts = valid_hod
 
             elif g.type == "MATHS_TUT":
                 late = [7, 8, 6]; random.shuffle(late)
@@ -432,12 +427,10 @@ def solve(genes, config, resources, home_rooms, special_rooms):
                 unplaced.append(g)
         
         score = 1000000
-        # MASSIVE PENALTY FOR UNPLACED to force completion
         score -= (len(unplaced) * 100000000) 
         
         gaps, sparse_days = schedule.calculate_gaps_and_sparse()
-        # HEAVIER GAP PENALTY
-        score -= (gaps * 100000)
+        score -= (gaps * 50000000) # Increased to match cost logic
         score -= (sparse_days * 300000) 
         
         if run % 500 == 0: 
@@ -542,7 +535,6 @@ async def generate_timetable(req: TimetableRequest):
                         'teacher': teachers_map.get(entry['teacher_id'], DummyTeacher())
                     })
 
-                # Slice chunks based on available labs
                 for chunk_start in range(0, len(current_step_allocations), capacity):
                     chunk = current_step_allocations[chunk_start : chunk_start + capacity]
                     
