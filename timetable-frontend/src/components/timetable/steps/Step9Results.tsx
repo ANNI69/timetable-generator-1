@@ -124,6 +124,14 @@ export const Step9Results = ({
     return missing;
   }, [timetable, divisions]);
 
+  const getTeacherShortCode = (teacherName: string | undefined | null) => {
+    if (!teacherName) return '';
+    const trimmed = teacherName.trim();
+    if (!trimmed || trimmed === 'TBA') return trimmed;
+    const match = faculty.find(f => f.name === trimmed);
+    return match?.shortCode?.trim() || trimmed;
+  };
+
   const timeSlots = useMemo(() => {
     const slots = [];
     if (!timingData?.startTime) return [];
@@ -220,6 +228,14 @@ export const Step9Results = ({
   const renderCellContent = (entry: any, day: string, slotIdx: number) => {
     if (!entry) {
         // EMPTY CELL: Click to Add
+        const { freeTheory, freeLabs } = getAvailableRooms(
+          timetable,
+          infrastructure.theoryRooms || [],
+          infrastructure.labRooms || [],
+          day,
+          slotIdx
+        );
+
         return (
             <div className="h-full w-full min-h-[100px] flex flex-col items-center justify-center relative group p-1 transition-colors hover:bg-muted/10">
                {viewMode === 'MASTER' && (
@@ -227,6 +243,39 @@ export const Step9Results = ({
                        <Plus className="w-6 h-6 text-primary opacity-60 hover:scale-110 transition-transform" />
                    </div>
                )}
+               <div className="flex flex-col items-center justify-center gap-1 text-[10px] text-muted-foreground text-center px-1">
+                 {(freeTheory.length > 0 || freeLabs.length > 0) ? (
+                   <>
+                     <span className="uppercase tracking-wide text-[9px] font-semibold text-muted-foreground/80">
+                       Available Rooms
+                     </span>
+                     <div className="flex flex-col gap-0.5">
+                       {freeTheory.length > 0 && (
+                         <div>
+                           <span className="font-semibold mr-1">Class:</span>
+                           <span>
+                             {freeTheory.slice(0, 3).join(', ')}
+                             {freeTheory.length > 3 && ' +'}
+                           </span>
+                         </div>
+                       )}
+                       {freeLabs.length > 0 && (
+                         <div>
+                           <span className="font-semibold mr-1">Lab:</span>
+                           <span>
+                             {freeLabs.slice(0, 3).join(', ')}
+                             {freeLabs.length > 3 && ' +'}
+                           </span>
+                         </div>
+                       )}
+                     </div>
+                   </>
+                 ) : (
+                   <span className="italic text-[10px] text-muted-foreground/70">
+                     No rooms free
+                   </span>
+                 )}
+               </div>
             </div>
         );
     }
@@ -279,7 +328,12 @@ export const Step9Results = ({
                             <div key={i} className="flex flex-col bg-white/60 p-1.5 rounded-sm border border-pink-100">
                                 <span className="font-bold text-xs text-pink-950 truncate">{sub}</span>
                                 <div className="flex justify-between items-center mt-0.5">
-                                    <span className="text-[10px] text-pink-800">{teachers[i] || 'TBA'}</span>
+                                    <span className="text-[10px] text-pink-800">
+                                      {(() => {
+                                        const name = teachers[i] || 'TBA';
+                                        return name === 'TBA' ? 'TBA' : getTeacherShortCode(name);
+                                      })()}
+                                    </span>
                                     <span className="text-[10px] font-mono text-pink-700 bg-pink-100/50 px-1 rounded">{rooms[i] || 'TBA'}</span>
                                 </div>
                             </div>
@@ -316,7 +370,9 @@ export const Step9Results = ({
                                <div className="flex flex-col leading-none flex-1 min-w-0 gap-0.5">
                                    <span className={`font-bold text-[11px] ${textColor} truncate`} title={b.subject}>{b.subject}</span>
                                    <div className={`flex justify-between items-center w-full ${subTextColor}`}>
-                                       <span className="text-[10px] truncate max-w-[60px]">{b.teacher}</span>
+                                       <span className="text-[10px] truncate max-w-[60px]">
+                                         {getTeacherShortCode(b.teacher)}
+                                       </span>
                                        <span className="font-mono text-[10px] bg-white/50 px-1 rounded">{b.room}</span>
                                    </div>
                                </div>
@@ -338,7 +394,9 @@ export const Step9Results = ({
                 </div>
                 <div className="flex items-center gap-1.5 opacity-90 text-xs">
                     <User className="w-3 h-3" />
-                    <span className="truncate font-medium">{viewMode === 'TEACHER' ? entry.displayDiv : entry.teacher}</span>
+                    <span className="truncate font-medium">
+                      {viewMode === 'TEACHER' ? entry.displayDiv : getTeacherShortCode(entry.teacher)}
+                    </span>
                 </div>
             </div>
             <div className="mt-auto pt-2 border-t border-black/5 flex items-center justify-between opacity-80">
@@ -441,6 +499,126 @@ export const Step9Results = ({
       }
   };
 
+  const buildCsvForCurrentView = () => {
+    const rows: string[][] = [];
+
+    // Header row: Day + one column per visual slot (with Recess column)
+    const header: string[] = ['Day'];
+    timeSlots.forEach((slot, i) => {
+      if (i === timingData.recessAfterSlot) {
+        header.push('Recess');
+      }
+      header.push(`${slot.label} (Slot ${i + 1})`);
+    });
+    rows.push(header);
+
+    // Body: one row per day, one column per visual slot index
+    timingData.workingDays.forEach((day) => {
+      const row: string[] = [day];
+
+      timeSlots.forEach((slot, i) => {
+        // Recess column – keep empty cells, header already labels it
+        if (i === timingData.recessAfterSlot) {
+          row.push('');
+        }
+
+        const realSlotIdx = getBackendSlotIndex(i);
+        const entry: any = getDataForCell(day, realSlotIdx);
+
+        // No entry in this visual cell
+        if (!entry) {
+          row.push('');
+          return;
+        }
+
+        // For multi-slot lectures, only fill the starting visual slot to mimic colSpan
+        const isStart = entry.slot === realSlotIdx;
+        if (!isStart) {
+          row.push('');
+          return;
+        }
+
+        let cellText = '';
+
+        if (entry.type === 'ELECTIVE') {
+          const subjects = (entry.subject || '').split(' / ');
+          const teachers = (entry.teacher || '').split(' / ');
+          const rooms = (entry.room || '').split(' / ');
+
+          cellText = subjects
+            .map((sub: string, idx: number) => {
+              const tName = teachers[idx] || '';
+              const tCode = tName ? getTeacherShortCode(tName) : '';
+              const room = rooms[idx] || '';
+              const teacherPart = tCode || tName;
+              const roomPart = room ? ` (${room})` : '';
+              return `${sub}${teacherPart ? ` - ${teacherPart}` : ''}${roomPart}`;
+            })
+            .join(' | ');
+        } else if (
+          entry.type === 'LAB' ||
+          entry.type === 'TUTORIAL' ||
+          entry.type === 'MATHS_TUT'
+        ) {
+          cellText =
+            entry.batches
+              ?.map((b: any) => {
+                const tCode = getTeacherShortCode(b.teacher);
+                const roomPart = b.room ? ` (${b.room})` : '';
+                const batchLabel = b.batch ? `${b.batch} ` : '';
+                return `${batchLabel}${b.subject}${
+                  tCode ? ` - ${tCode}` : ''
+                }${roomPart}`;
+              })
+              .join(' | ') || '';
+        } else {
+          const teacherDisplay =
+            viewMode === 'TEACHER'
+              ? entry.displayDiv || ''
+              : getTeacherShortCode(entry.teacher);
+          const roomPart = entry.room ? ` (${entry.room})` : '';
+          cellText = `${entry.subject || ''}${
+            teacherDisplay ? ` - ${teacherDisplay}` : ''
+          }${roomPart}`;
+        }
+
+        row.push(cellText);
+      });
+
+      rows.push(row);
+    });
+
+    const escape = (value: string) =>
+      `"${String(value).replace(/"/g, '""')}"`;
+
+    return rows.map((row) => row.map(escape).join(',')).join('\n');
+  };
+
+  const handleDownloadCSV = () => {
+    if (!timingData || !timetable) {
+      toast({
+        title: 'No timetable to export',
+        description: 'Please generate the timetable first.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const csvContent = buildCsvForCurrentView();
+    const blob = new Blob([csvContent], {
+      type: 'text/csv;charset=utf-8;',
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const safeEntity = (selectedEntity || 'timetable').replace(/\s+/g, '_');
+    link.href = url;
+    link.download = `${viewMode.toLowerCase()}_${safeEntity}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+
+    toast({ title: 'CSV download started' });
+  };
+
   return (
     <div className="form-section animate-slide-up pb-10">
       {/* Header Controls */}
@@ -476,6 +654,14 @@ export const Step9Results = ({
                     {viewMode === 'LAB' && infrastructure.labRooms.map(r => <SelectItem key={r} value={r}>{r}</SelectItem>)}
                 </SelectContent>
             </Select>
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-2 h-9"
+              onClick={handleDownloadCSV}
+            >
+              <Download className="w-4 h-4" /> CSV
+            </Button>
             <Button type="button" variant="outline" className="gap-2 h-9" onClick={() => toast({title: "Download Started"})}>
                 <Download className="w-4 h-4" /> PDF
             </Button>
@@ -486,15 +672,24 @@ export const Step9Results = ({
       <div className="overflow-x-auto rounded-xl border border-border shadow-md bg-white">
         <table className="w-full min-w-[1200px] border-collapse">
             <thead>
-                <tr className="bg-muted/30 border-b border-border h-14">
-                    <th className="p-3 w-28 text-center font-bold text-muted-foreground uppercase text-xs tracking-wider border-r border-border sticky left-0 bg-white z-20 shadow-[1px_0_0_0_rgba(0,0,0,0.1)]">Day</th>
+                <tr className="bg-muted/30 border-b border-border h-10">
+                    <th className="h-10 py-1 px-2 w-28 text-center align-middle font-bold text-muted-foreground uppercase text-xs tracking-wider border-r border-border sticky left-0 bg-white z-20 shadow-[1px_0_0_0_rgba(0,0,0,0.1)]">Day</th>
                     {timeSlots.map((slot, i) => (
                         <Fragment key={i}>
-                            {i === timingData.recessAfterSlot && <th className="w-10 bg-yellow-50/50 border-r border-yellow-200/50 text-[10px] text-center p-0"><div className="w-full h-full flex items-center justify-center" style={{writingMode: 'vertical-lr'}}>Recess</div></th>}
-                            <th className="p-2 text-center border-r border-border min-w-[160px]">
-                                <div className="flex flex-col items-center">
-                                    <span className="text-[10px] text-muted-foreground bg-muted/50 px-2 py-0.5 rounded mb-1">{slot.label}</span>
-                                    <span className="text-xs font-bold">Slot {i + 1}</span>
+                            {i === timingData.recessAfterSlot && (
+                              <th className="relative h-10 w-10 bg-yellow-50/50 border-r border-yellow-200/50 p-0 align-middle">
+                                <div
+                                  className="absolute inset-0 flex items-center justify-center text-[9px] leading-none font-semibold text-muted-foreground"
+                                  style={{ writingMode: 'vertical-rl' }}
+                                >
+                                  Recess
+                                </div>
+                              </th>
+                            )}
+                            <th className="h-10 py-1 px-2 text-center align-middle border-r border-border min-w-[160px]">
+                                <div className="flex flex-col items-center justify-center leading-none gap-0.5">
+                                    <span className="text-[9px] text-muted-foreground bg-muted/50 px-1.5 py-0 rounded whitespace-nowrap">{slot.label}</span>
+                                    <span className="text-[11px] font-bold leading-none">Slot {i + 1}</span>
                                 </div>
                             </th>
                         </Fragment>
