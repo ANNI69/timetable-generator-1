@@ -366,7 +366,7 @@ def solve(genes, config, resources, home_rooms, special_rooms):
 
     TOTAL_BATCHES = 3 
 
-    for run in range(5000): 
+    for run in range(1100): 
         schedule = Schedule(copy.deepcopy(genes), CONSTANTS)
         unplaced = []
         
